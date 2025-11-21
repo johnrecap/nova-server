@@ -187,3 +187,54 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 module.exports = app;
+// ... (باقي الكود اللي فوق زي ما هو)
+
+// 4. البحث (FIXED: Royal Road Search)
+app.get('/search', async (req, res) => {
+    const queryText = req.query.q;
+    if (!queryText) return res.json([]);
+
+    console.log(`🔍 Searching for: ${queryText}`);
+    
+    // رابط البحث الصحيح في Royal Road
+    const targetUrl = `${BASE_URL}/fictions/search?title=${encodeURIComponent(queryText)}`;
+
+    try {
+        const response = await axios.get(targetUrl, { headers, timeout: 10000 });
+        const $ = cheerio.load(response.data);
+        const novels = [];
+
+        // في صفحة البحث، الكلاسات مختلفة شوية
+        $('.fiction-list-item').each((i, el) => {
+            const title = $(el).find('.fiction-title').text().trim();
+            const urlPart = $(el).find('.fiction-title a').attr('href');
+            const image = $(el).find('img').attr('src');
+            const author = $(el).find('.author').text().trim().replace('by ', '');
+            
+            // تقييم البحث بيكون مختلف أحياناً، هنحاول نجيبه
+            let rating = '4.5'; 
+            const starTitle = $(el).find('.star').attr('title');
+            if (starTitle) rating = starTitle.substring(0, 3);
+
+            if (title && urlPart) {
+                novels.push({
+                    id: urlPart,
+                    title,
+                    image,
+                    author,
+                    rating,
+                    source: 'royalroad'
+                });
+            }
+        });
+
+        console.log(`✅ Found ${novels.length} results.`);
+        res.json(novels);
+
+    } catch (error) {
+        console.error("Search failed:", error.message);
+        res.json([]); 
+    }
+});
+
+// ... (باقي الكود زي ما هو)
