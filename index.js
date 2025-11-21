@@ -173,7 +173,7 @@ app.get('/details', async (req, res) => {
         });
 
         // ج: حفظ في قاعدة البيانات للمستقبل
-        saveNovelToDB({ id: url, title, image, author, summary: description, rating: '4.5' }, chapters);
+    await  saveNovelToDB({ id: url, title, image, author, summary: description, rating: '4.5' }, chapters);
 
         res.json({ description, chapters });
     } catch (error) {
