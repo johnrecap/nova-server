@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
-const { query } = require('./db'); // استدعاء الاتصال بقاعدة البيانات
+const { query } = require('./db'); 
 
 const app = express();
 app.use(cors());
@@ -15,12 +15,70 @@ const headers = {
 
 const BASE_URL = 'https://www.royalroad.com';
 
-// --- دوال مساعدة للتعامل مع قاعدة البيانات ---
+// --- 🛠️ الزرار السحري: رابط لإنشاء الجداول (شغله مرة واحدة بس) ---
+app.get('/init-db', async (req, res) => {
+    const createTablesQuery = `
+      CREATE TABLE IF NOT EXISTS users (
+        user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        username VARCHAR(100),
+        auth_method VARCHAR(50),
+        created_at TIMESTAMP DEFAULT NOW()
+      );
 
-// حفظ الرواية والفصول في قاعدة البيانات
+      CREATE TABLE IF NOT EXISTS novels (
+        novel_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        source_id VARCHAR(255) UNIQUE,
+        title VARCHAR(500),
+        author VARCHAR(255),
+        cover_url TEXT,
+        description TEXT,
+        status VARCHAR(50),
+        rating VARCHAR(10),
+        total_chapters INT DEFAULT 0,
+        synced_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS chapters (
+        chapter_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        novel_id UUID REFERENCES novels(novel_id) ON DELETE CASCADE,
+        chapter_number INT,
+        title VARCHAR(500),
+        url VARCHAR(500),
+        content TEXT,
+        synced_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS user_library (
+        library_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+        novel_id UUID REFERENCES novels(novel_id) ON DELETE CASCADE,
+        added_at TIMESTAMP DEFAULT NOW(),
+        current_chapter INT DEFAULT 1,
+        UNIQUE(user_id, novel_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_stats (
+        stats_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+        level INT DEFAULT 1,
+        total_xp INT DEFAULT 0,
+        reading_time_minutes INT DEFAULT 0
+      );
+    `;
+
+    try {
+        await query(createTablesQuery);
+        res.send("✅ Database Tables Created Successfully! (مبروك، الجداول اتعملت)");
+    } catch (e) {
+        res.status(500).send("❌ Error creating tables: " + e.message);
+    }
+});
+
+// --- باقي الكود (حفظ وجلب الروايات) ---
+
 async function saveNovelToDB(novelData, chapters) {
     try {
-        // 1. إدخال الرواية أو تحديثها إذا كانت موجودة
         const novelQuery = `
             INSERT INTO novels (source_id, title, author, cover_url, description, rating, total_chapters, synced_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
@@ -31,18 +89,12 @@ async function saveNovelToDB(novelData, chapters) {
                 synced_at = NOW()
             RETURNING novel_id;
         `;
-        
-        const novelValues = [
-            novelData.id, novelData.title, novelData.author, 
-            novelData.image, novelData.summary, novelData.rating, chapters.length
-        ];
-        
-        const res = await query(novelQuery, novelValues);
+        const values = [novelData.id, novelData.title, novelData.author, novelData.image, novelData.summary, novelData.rating, chapters.length];
+        const res = await query(novelQuery, values);
         const novelId = res.rows[0].novel_id;
 
-        // 2. إدخال الفصول (فقط إذا لم تكن موجودة)
-        // ملاحظة: هذا تبسيط، في الإنتاج نستخدم Bulk Insert
-        for (let i = 0; i < chapters.length; i++) {
+        // إدخال الفصول (بحد أقصى 50 فصل في المرة الواحدة لتجنب الضغط)
+        for (let i = 0; i < Math.min(chapters.length, 50); i++) {
             const ch = chapters[i];
             await query(`
                 INSERT INTO chapters (novel_id, chapter_number, title, url)
@@ -56,19 +108,12 @@ async function saveNovelToDB(novelData, chapters) {
     }
 }
 
-// حفظ محتوى الفصل عند القراءة
 async function saveChapterContent(url, content) {
     try {
-        await query(`
-            UPDATE chapters SET content = $1, synced_at = NOW()
-            WHERE url = $2
-        `, [content, url]);
-    } catch (e) {
-        console.error("Error saving content:", e);
-    }
+        await query('UPDATE chapters SET content = $1, synced_at = NOW() WHERE url = $2', [content, url]);
+    } catch (e) { console.error("Error saving content:", e); }
 }
 
-// دالة تحويل بيانات جوجل
 const mapGoogleBook = (item) => {
     const info = item.volumeInfo;
     return {
@@ -82,36 +127,25 @@ const mapGoogleBook = (item) => {
     };
 };
 
-// --- الروابط (Endpoints) ---
+app.get('/', (req, res) => {
+    res.send("Nova Server is Running! 🚀 Go to /init-db to setup database.");
+});
 
-// 1. الرئيسية (Discovery)
 app.get('/novels', async (req, res) => {
-    // هنا سنجلب البيانات الطازجة دائمًا من المصادر
-    // ولكن مستقبلاً يمكننا جلب "الأكثر قراءة" من قاعدة البيانات
     try {
         const response = await axios.get(`${BASE_URL}/fictions/weekly-popular`, { headers, timeout: 5000 });
         const $ = cheerio.load(response.data);
         const novels = [];
-
         $('.fiction-list-item').each((i, el) => {
             const title = $(el).find('.fiction-title').text().trim();
             const urlPath = $(el).find('.fiction-title a').attr('href');
             const image = $(el).find('img').attr('src');
             const author = $(el).find('.author').text().trim().replace('by ', '');
             const rating = $(el).find('.star').attr('title') || '4.5';
-
-            if (title && urlPath) {
-                novels.push({
-                    id: urlPath,
-                    title, image, author, rating: rating.substring(0, 3),
-                    summary: "Tap to read...",
-                    source: 'royalroad'
-                });
-            }
+            if (title && urlPath) novels.push({ id: urlPath, title, image, author, rating: rating.substring(0, 3), summary: "Tap to read...", source: 'royalroad' });
         });
         res.json(novels.length > 0 ? novels : []);
     } catch (error) {
-        // Fallback to Google
         try {
             const googleRes = await axios.get('https://www.googleapis.com/books/v1/volumes?q=subject:fantasy+litrpg&orderBy=newest&maxResults=20&langRestrict=en');
             res.json(googleRes.data.items.map(mapGoogleBook));
@@ -119,7 +153,6 @@ app.get('/novels', async (req, res) => {
     }
 });
 
-// 2. البحث
 app.get('/search', async (req, res) => {
     const q = req.query.q;
     try {
@@ -128,12 +161,9 @@ app.get('/search', async (req, res) => {
     } catch (error) { res.json([]); }
 });
 
-// 3. التفاصيل (ذكي: DB أولاً -> ثم Web)
 app.get('/details', async (req, res) => {
-    const url = req.query.url; // هذا هو source_id
-
+    const url = req.query.url;
     try {
-        // أ: التحقق من قاعدة البيانات
         const dbCheck = await query(`
             SELECT n.*, json_agg(json_build_object('title', c.title, 'url', c.url)) as chapters
             FROM novels n
@@ -144,18 +174,11 @@ app.get('/details', async (req, res) => {
 
         if (dbCheck.rows.length > 0 && dbCheck.rows[0].total_chapters > 0) {
             console.log("🚀 Served from DB!");
-            return res.json({
-                description: dbCheck.rows[0].description,
-                chapters: dbCheck.rows[0].chapters
-            });
+            return res.json({ description: dbCheck.rows[0].description, chapters: dbCheck.rows[0].chapters });
         }
-    } catch (e) { console.error("DB Check failed, falling back to web"); }
+    } catch (e) {}
 
-    // ب: الجلب من الويب (Scraping)
-    if (!url.includes('/fiction/')) {
-        // Google Book logic (No chapters usually)
-        return res.json({ description: "From Google Books", chapters: [{title: "Read Full", url: url}] });
-    }
+    if (!url.includes('/fiction/')) return res.json({ description: "From Google Books", chapters: [{title: "Read Full", url: url}] });
 
     try {
         const response = await axios.get(`${BASE_URL}${url}`, { headers });
@@ -164,7 +187,6 @@ app.get('/details', async (req, res) => {
         const title = $('h1').text().trim();
         const image = $('.cover-art-container img').attr('src');
         const author = $('.author').text().trim().replace('by ', '');
-        
         const chapters = [];
         $('#chapters tbody tr').each((i, el) => {
             const link = $(el).find('a').attr('href');
@@ -172,56 +194,30 @@ app.get('/details', async (req, res) => {
             if (link) chapters.push({ title: cTitle, url: link });
         });
 
-        // ج: حفظ في قاعدة البيانات للمستقبل
-    await  saveNovelToDB({ id: url, title, image, author, summary: description, rating: '4.5' }, chapters);
-
+        await saveNovelToDB({ id: url, title, image, author, summary: description, rating: '4.5' }, chapters);
         res.json({ description, chapters });
-    } catch (error) {
-        res.json({ description: "Error loading details", chapters: [] });
-    }
+    } catch (error) { res.json({ description: "Error loading details", chapters: [] }); }
 });
 
-// 4. القراءة (ذكي: DB أولاً -> ثم Web)
 app.get('/read', async (req, res) => {
     const url = req.query.url;
-
     try {
-        // أ: التحقق من قاعدة البيانات
         const dbCh = await query('SELECT content, title FROM chapters WHERE url = $1', [url]);
-        if (dbCh.rows.length > 0 && dbCh.rows[0].content) {
-            console.log("📖 Chapter served from DB!");
-            return res.json({ title: dbCh.rows[0].title, content: dbCh.rows[0].content });
-        }
+        if (dbCh.rows.length > 0 && dbCh.rows[0].content) return res.json({ title: dbCh.rows[0].title, content: dbCh.rows[0].content });
     } catch (e) {}
 
-    // ب: الجلب من الويب
-    if (!url.includes('/fiction/')) {
-        // Google logic
-        try {
-            const gRes = await axios.get(`https://www.googleapis.com/books/v1/volumes/${url}`);
-            const desc = (gRes.data.volumeInfo.description || "").replace(/<[^>]*>?/gm, '');
-            return res.json({ title: "Preview", content: desc });
-        } catch (e) { return res.json({ content: "Error" }); }
-    }
+    if (!url.includes('/fiction/')) return res.json({ content: "Google Book content unavailable." });
 
-    // Royal Road Logic
     try {
         const response = await axios.get(`${BASE_URL}${url}`, { headers });
         const $ = cheerio.load(response.data);
-        let content = $('.chapter-content').text().trim();
-        content = content.replace(/\n\s*\n/g, '\n\n'); 
+        let content = $('.chapter-content').text().trim().replace(/\n\s*\n/g, '\n\n');
         const title = $('h1').text().trim();
-
-        // ج: الحفظ في قاعدة البيانات
-        saveChapterContent(url, content);
-
+        await saveChapterContent(url, content);
         res.json({ title, content });
-    } catch (error) {
-        res.json({ content: "Failed to load chapter." });
-    }
+    } catch (error) { res.json({ content: "Failed to load chapter." }); }
 });
 
-// 5. التصنيفات
 app.get('/genre', async (req, res) => {
     const tag = req.query.tag;
     try {
