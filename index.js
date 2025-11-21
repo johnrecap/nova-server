@@ -190,3 +190,81 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 module.exports = app;
+
+// ... (imports existing code)
+
+// Middleware للتحقق من التوكين (مهم لحماية الرصيد)
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (!token) return res.sendStatus(401);
+
+    jwt.verify(token, process.env.JWT_SECRET || 'super-secret-key-123', (err, user) => {
+        if (err) return res.sendStatus(403);
+        req.user = user;
+        next();
+    });
+};
+
+// --- ⏳ Time & Ads Endpoints ---
+
+// 1. جلب رصيد الوقت والإحصائيات
+app.get('/user/stats', authenticateToken, async (req, res) => {
+    try {
+        // التأكد من وجود سجل stats للمستخدم
+        let stats = await query('SELECT * FROM user_stats WHERE user_id = $1', [req.user.userId]);
+        if (stats.rows.length === 0) {
+            // إنشاء سجل إذا لم يوجد
+            await query('INSERT INTO user_stats (user_id) VALUES ($1)', [req.user.userId]);
+            stats = await query('SELECT * FROM user_stats WHERE user_id = $1', [req.user.userId]);
+        }
+        res.json(stats.rows[0]);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. خصم الوقت (يتم استدعاؤه كل دقيقة أثناء القراءة)
+app.post('/user/sync-time', authenticateToken, async (req, res) => {
+    const { minutes_consumed } = req.body; // كم دقيقة قرأها المستخدم محلياً
+    if (!minutes_consumed || minutes_consumed <= 0) return res.json({ success: true });
+
+    try {
+        // نخصم الدقائق ونرجع الرصيد الجديد
+        // GREATEST(0, ...) يمنع الرصيد ينزل بالسالب
+        const result = await query(
+            `UPDATE user_stats 
+             SET reading_time_minutes = GREATEST(0, reading_time_minutes - $1), last_updated = NOW() 
+             WHERE user_id = $2 
+             RETURNING reading_time_minutes`,
+            [minutes_consumed, req.user.userId]
+        );
+        res.json({ success: true, remaining: result.rows[0].reading_time_minutes });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. مكافأة مشاهدة الإعلان
+app.post('/user/ad-reward', authenticateToken, async (req, res) => {
+    const REWARD_AMOUNT = 20; // 20 دقيقة
+    try {
+        // 1. تسجيل العملية في السجل
+        await query('INSERT INTO ad_logs (user_id, reward_minutes) VALUES ($1, $2)', [req.user.userId, REWARD_AMOUNT]);
+        
+        // 2. إضافة الرصيد
+        const result = await query(
+            `UPDATE user_stats 
+             SET reading_time_minutes = reading_time_minutes + $1, last_updated = NOW() 
+             WHERE user_id = $2 
+             RETURNING reading_time_minutes`,
+            [REWARD_AMOUNT, req.user.userId]
+        );
+        
+        res.json({ success: true, new_balance: result.rows[0].reading_time_minutes, message: "+20 Minutes Added!" });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ... (rest of the file: /search, /novels, etc.)
