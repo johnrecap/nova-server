@@ -77,36 +77,62 @@ app.post('/translate', async (req, res) => {
 
 // --- باقي الروابط ---
 
-// إصلاح البحث
+// 4. البحث (تم إصلاح المشكلة + فلترة النتائج الفارغة)
 app.get('/search', async (req, res) => {
     const queryText = req.query.q;
     if (!queryText) return res.json([]);
-    console.log(`🔍 Searching: ${queryText}`);
+
+    console.log(`🔍 Searching for: ${queryText}`);
     
     const targetUrl = `${BASE_URL}/fictions/search?title=${encodeURIComponent(queryText)}`;
 
     try {
-        const response = await axios.get(targetUrl, { headers, timeout: 10000 });
+        const response = await axios.get(targetUrl, { headers, timeout: 15000 });
         const $ = cheerio.load(response.data);
         const novels = [];
 
+        // البحث في Royal Road له تصميم مختلف (search-item)
         $('.fiction-list-item').each((i, el) => {
-            const title = $(el).find('.fiction-title').text().trim();
-            const urlPart = $(el).find('.fiction-title a').attr('href');
-            const image = $(el).find('img').attr('src');
-            const author = $(el).find('.author').text().trim().replace('by ', '');
+            // محاولة اصطياد العنوان بأكثر من طريقة
+            let title = $(el).find('.fiction-title').text().trim();
+            if (!title) title = $(el).find('h2.fiction-title').text().trim();
+
+            // محاولة اصطياد الرابط
+            let urlPart = $(el).find('.fiction-title a').attr('href');
+            if (!urlPart) urlPart = $(el).find('a').attr('href'); // محاولة احتياطية
+
+            // محاولة اصطياد الصورة
+            let image = $(el).find('img').attr('src');
             
-            // جلب التقييم في صفحة البحث
+            // اصطياد المؤلف
+            let author = $(el).find('.author').text().trim().replace('by ', '');
+            if (!author) author = "Unknown";
+
+            // اصطياد التقييم
             let rating = '4.5';
             const starTitle = $(el).find('.star').attr('title');
             if (starTitle) rating = starTitle.substring(0, 3);
 
-            if (title && urlPart) {
-                novels.push({ id: urlPart, title, image, author, rating, source: 'royalroad' });
+            // ⚠️ الفلتر الأمني: لو مفيش عنوان أو مفيش صورة، متقبلش الرواية دي
+            if (title && title.length > 1 && urlPart && image) {
+                novels.push({
+                    id: urlPart,
+                    title: title,
+                    image: image,
+                    author: author,
+                    rating: rating,
+                    source: 'royalroad'
+                });
             }
         });
+
+        console.log(`✅ Found ${novels.length} valid results.`);
         res.json(novels);
-    } catch (error) { res.json([]); }
+
+    } catch (error) {
+        console.error("Search failed:", error.message);
+        res.json([]); 
+    }
 });
 
 app.get('/novels', async (req, res) => {
