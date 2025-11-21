@@ -7,16 +7,14 @@
     "start": "node index.js",
     "db:setup": "node db-setup.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "axios": "^1.13.2",
+    "bcryptjs": "^2.4.3",
     "cheerio": "^1.1.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
     "pg": "^8.11.3"
   }
 }
