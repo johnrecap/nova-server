@@ -17,7 +17,7 @@ const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 };
 
-// --- Auth Routes (زي ما هي) ---
+// --- Auth (زي ما هو) ---
 app.post('/auth/register', async (req, res) => {
     const { email, password, username } = req.body;
     if (!email || !password) return res.status(400).json({ error: "Missing data" });
@@ -41,9 +41,7 @@ app.post('/auth/login', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- Novels Logic (Automatic & Infinite) ---
-
-// دالة حفظ الروايات المستوردة في قاعدة البيانات
+// --- دوال مساعدة ---
 async function saveImportedNovels(novelsList) {
     for (const novel of novelsList) {
         try {
@@ -53,16 +51,30 @@ async function saveImportedNovels(novelsList) {
                 ON CONFLICT (source_id) DO UPDATE SET 
                 rating = EXCLUDED.rating, title = EXCLUDED.title, synced_at = NOW()
             `, [novel.id, novel.title, novel.author, novel.image, novel.rating]);
-        } catch (e) { console.error("Skipped novel:", novel.title); }
+        } catch (e) { console.error("Skipped:", novel.title); }
     }
 }
 
-// 1. جلب الروايات (يدعم الصفحات والتصنيفات)
+const mapGoogleBook = (item) => {
+    const info = item.volumeInfo;
+    return {
+        id: item.id, 
+        title: info.title,
+        image: (info.imageLinks?.thumbnail || '').replace('http://', 'https://'),
+        author: info.authors ? info.authors[0] : 'Unknown',
+        rating: info.averageRating ? info.averageRating.toString() : '4.5',
+        source: 'google'
+    };
+};
+
+// --- الروابط الأساسية ---
+
+// 1. جلب الروايات (التعديل هنا 👇)
 app.get('/novels', async (req, res) => {
     const page = req.query.page || 1;
     const category = req.query.category || 'all';
     
-    // خرائط التصنيفات في Royal Road
+    // خريطة التصنيفات
     const genreMap = {
         'all': 'active',
         'fantasy': 'active?genre=fantasy',
@@ -73,14 +85,16 @@ app.get('/novels', async (req, res) => {
         'scifi': 'active?genre=sci_fi'
     };
 
-    const urlPath = genreMap[category] || 'active';
-    // تجميع الرابط مع رقم الصفحة
-    const targetUrl = `${BASE_URL}/fictions/${urlPath}&page=${page}`;
+    let urlPath = genreMap[category] || 'active';
+    
+    // ✅ التصحيح: التأكد من العلامة المناسبة (? أو &)
+    const separator = urlPath.includes('?') ? '&' : '?';
+    const targetUrl = `${BASE_URL}/fictions/${urlPath}${separator}page=${page}`;
 
-    console.log(`Scraping Page ${page} for ${category}: ${targetUrl}`);
+    console.log(`Fetching: ${targetUrl}`);
 
     try {
-        const response = await axios.get(targetUrl, { headers, timeout: 8000 });
+        const response = await axios.get(targetUrl, { headers, timeout: 10000 }); // زودنا الوقت لـ 10 ثواني
         const $ = cheerio.load(response.data);
         const novels = [];
 
@@ -89,9 +103,8 @@ app.get('/novels', async (req, res) => {
             const urlPart = $(el).find('.fiction-title a').attr('href');
             const image = $(el).find('img').attr('src');
             const author = $(el).find('.author').text().trim().replace('by ', '');
-            const rating = $(el).find('.star').attr('title') || '0.0';
+            const rating = $(el).find('.star').attr('title') || '4.5';
             
-            // التأكد من وجود بيانات سليمة
             if (title && urlPart) {
                 novels.push({
                     id: urlPart,
@@ -104,29 +117,43 @@ app.get('/novels', async (req, res) => {
             }
         });
 
-        // حفظ الدفعة الجديدة في قاعدة البيانات تلقائياً (Automatic Ingestion)
         if (novels.length > 0) {
+            // لو لقينا روايات، نحفظهم ونرجعهم
             await saveImportedNovels(novels);
+            return res.json(novels);
         }
-
-        res.json(novels);
+        
+        throw new Error("No novels found via scraping");
 
     } catch (error) {
-        console.error("Scraping Error:", error.message);
-        // لو فشل السحب، نجيب من الداتا بيز بتاعتنا كاحتياطي
+        console.error("Scraping failed, switching to Backup plan...");
+        
+        // الخطة ب (Backup): لو Royal Road فشل، هات من Google Books عشان الشاشة متبقاش فاضية
         try {
-            const offset = (page - 1) * 20;
-            const dbNovels = await query(`SELECT source_id as id, title, cover_url as image, author, rating FROM novels ORDER BY synced_at DESC LIMIT 20 OFFSET $1`, [offset]);
-            res.json(dbNovels.rows);
-        } catch (dbError) {
-            res.json([]);
+            const googleQuery = category === 'all' ? 'fantasy' : category;
+            const googleRes = await axios.get(`https://www.googleapis.com/books/v1/volumes?q=subject:${googleQuery}&orderBy=newest&startIndex=${(page-1)*10}&maxResults=10&langRestrict=en`);
+            
+            if (googleRes.data.items) {
+                const gNovels = googleRes.data.items.map(mapGoogleBook);
+                res.json(gNovels); // ارجع روايات جوجل
+            } else {
+                res.json([]); // مفيش أمل
+            }
+        } catch (gError) {
+            res.json([]); 
         }
     }
 });
 
-// 2. تفاصيل الرواية
+// 2. التفاصيل
 app.get('/details', async (req, res) => {
     const url = req.query.url;
+    
+    // لو الرواية جاية من Google (الـ ID بتاعها مش رابط)
+    if (!url.includes('/fiction/')) {
+        return res.json({ description: "Book from Google Library.", chapters: [{title: "Read Preview", url: url}] });
+    }
+
     try {
         const response = await axios.get(`${BASE_URL}${url}`, { headers });
         const $ = cheerio.load(response.data);
@@ -142,14 +169,9 @@ app.get('/details', async (req, res) => {
             if (link) chapters.push({ title: cTitle, url: link });
         });
 
-        // تحديث البيانات في قاعدة البيانات
-        await query(`
-            UPDATE novels SET description = $1, total_chapters = $2, cover_url = $3 WHERE source_id = $4
-        `, [description, chapters.length, image, url]);
-
-        // حفظ الفصول
-        // (للسرعة سنحفظ أول 50 فقط في الاستدعاء الفوري، والباقي عند الطلب)
-        // يمكن تحسين هذا لاحقاً
+        await query(`UPDATE novels SET description = $1, total_chapters = $2, cover_url = $3 WHERE source_id = $4`, [description, chapters.length, image, url]);
+        
+        // حفظ الفصول (أول 50)
         const novelRes = await query(`SELECT novel_id FROM novels WHERE source_id = $1`, [url]);
         if (novelRes.rows.length > 0) {
              const novelId = novelRes.rows[0].novel_id;
@@ -158,7 +180,6 @@ app.get('/details', async (req, res) => {
                 await query(`INSERT INTO chapters (novel_id, chapter_number, title, url) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, [novelId, i + 1, ch.title, ch.url]);
             }
         }
-
         res.json({ description, chapters });
     } catch (error) { res.json({ description: "Error loading details", chapters: [] }); }
 });
@@ -166,21 +187,28 @@ app.get('/details', async (req, res) => {
 // 3. القراءة
 app.get('/read', async (req, res) => {
     const url = req.query.url;
+    
+    // Google Preview Logic
+    if (!url.includes('/fiction/')) {
+        try {
+            const gRes = await axios.get(`https://www.googleapis.com/books/v1/volumes/${url}`);
+            const desc = (gRes.data.volumeInfo.description || "").replace(/<[^>]*>?/gm, '');
+            return res.json({ title: "Preview", content: desc });
+        } catch (e) { return res.json({ content: "Content not available." }); }
+    }
+
     try {
         const response = await axios.get(`${BASE_URL}${url}`, { headers });
         const $ = cheerio.load(response.data);
         let content = $('.chapter-content').text().trim().replace(/\n\s*\n/g, '\n\n');
         const title = $('h1').text().trim();
-        
-        // حفظ المحتوى
         await query('UPDATE chapters SET content = $1 WHERE url = $2', [content, url]);
-        
         res.json({ title, content });
     } catch (error) { res.json({ content: "Failed to load chapter." }); }
 });
 
 app.get('/init-db', async (req, res) => { res.send("DB is ready"); });
-app.get('/', (req, res) => res.send("Nova Infinite Scraper is Ready! ♾️"));
+app.get('/', (req, res) => res.send("Nova Server Fixed & Ready! 🚀"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
